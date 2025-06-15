@@ -34,6 +34,10 @@ export async function sendEmail({ to, subject, html }: SendEmailParams) {
       html,
     });
 
+    if (data.error) {
+      throw new Error(data.error.message);
+    }
+
     console.log('邮件发送成功:', data);
     return { success: true, data };
   } catch (error) {

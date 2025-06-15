@@ -5,6 +5,50 @@ import { isValidEmail, hashPassword } from '@/lib/auth-utils';
 import { db } from '@/lib/db';
 import { users, userActivities } from '@/lib/schema';
 
+// 发送验证邮件的通用函数
+async function sendVerificationEmail(userEmail: string, locale: string) {
+  try {
+    console.log('开始发送验证邮件:', userEmail);
+    
+    // 生成邮箱验证令牌
+    const verificationToken = await createVerificationToken(
+      userEmail,
+      'email_verification',
+      24
+    );
+
+    if (!verificationToken) {
+      console.error('生成验证令牌失败:', userEmail);
+      return { success: false, error: '生成验证令牌失败' };
+    }
+
+    console.log('验证令牌生成成功:', verificationToken);
+
+    // 发送验证邮件
+    const verificationUrl = `${process.env.NEXTAUTH_URL}/${locale}/auth/verify-email?token=${verificationToken}`;
+    console.log('验证链接:', verificationUrl);
+    
+    const emailHtml = generateVerificationEmailHtml(verificationUrl, locale);
+    
+    const emailResult = await sendEmail({
+      to: userEmail,
+      subject: locale === 'zh' ? 'Aiartools - 邮箱验证' : 'Aiartools - Email Verification',
+      html: emailHtml,
+    });
+
+    if (!emailResult.success) {
+      console.error('验证邮件发送失败:', userEmail, emailResult.error);
+      return { success: false, error: emailResult.error };
+    } else {
+      console.log('验证邮件发送成功:', userEmail, emailResult.data);
+      return { success: true, data: emailResult.data };
+    }
+  } catch (error) {
+    console.error('发送验证邮件错误:', userEmail, error);
+    return { success: false, error: error };
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { email, password, locale = 'zh' } = await request.json();
@@ -32,8 +76,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // 检查邮箱是否已经注册
+    const existingUser = await db.query.users.findFirst({
+      where: (users, { eq }) => eq(users.email, email.toLowerCase().trim())
+    });
+
+    if (existingUser) {
+      if (existingUser.isEmailVerified) {
+        return NextResponse.json(
+          { error: '该邮箱已经注册并验证，请直接登录' },
+          { status: 400 }
+        );
+      } else {
+        // 重新发送验证邮件
+        const emailResult = await sendVerificationEmail(existingUser.email, locale);
+        
+        if (emailResult.success) {
+          return NextResponse.json(
+            { message: '该邮箱已注册但未验证，已重新发送验证邮件，请检查邮箱' },
+            { status: 200 }
+          );
+        } else {
+          return NextResponse.json(
+            { error: '该邮箱已注册但未验证，重新发送验证邮件失败，请稍后重试' },
+            { status: 500 }
+          );
+        }
+      }
+    }
+
     // 创建新用户
     const hashedPassword = await hashPassword(password);
+    
     const [newUser] = await db.insert(users).values({
       email: email.toLowerCase().trim(),
       password: hashedPassword,
@@ -81,43 +155,7 @@ export async function POST(request: NextRequest) {
 
     // 异步发送验证邮件（不阻塞响应）
     Promise.resolve().then(async () => {
-      try {
-        console.log('开始发送验证邮件:', newUser.email);
-        
-        // 生成邮箱验证令牌
-        const verificationToken = await createVerificationToken(
-          newUser.email,
-          'email_verification',
-          24
-        );
-
-        if (!verificationToken) {
-          console.error('生成验证令牌失败:', newUser.email);
-          return;
-        }
-
-        console.log('验证令牌生成成功:', verificationToken);
-
-        // 发送验证邮件
-        const verificationUrl = `${process.env.NEXTAUTH_URL}/${locale}/auth/verify-email?token=${verificationToken}`;
-        console.log('验证链接:', verificationUrl);
-        
-        const emailHtml = generateVerificationEmailHtml(verificationUrl, locale);
-        
-        const emailResult = await sendEmail({
-          to: newUser.email,
-          subject: locale === 'zh' ? 'Aiartools - 邮箱验证' : 'Aiartools - Email Verification',
-          html: emailHtml,
-        });
-
-        if (!emailResult.success) {
-          console.error('验证邮件发送失败:', newUser.email, emailResult.error);
-        } else {
-          console.log('验证邮件发送成功:', newUser.email, emailResult.data);
-        }
-      } catch (error) {
-        console.error('异步发送验证邮件错误:', newUser.email, error);
-      }
+      await sendVerificationEmail(newUser.email, locale);
     }).catch((error) => {
       console.error('Promise异步执行错误:', error);
     });
